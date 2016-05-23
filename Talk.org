@@ -1,0 +1,665 @@
+#+TITLE: Shen Trick Shots
+#+AUTHOR: Aditya Siram
+#+OPTIONS: H:1 toc:f
+#+LATEX_CLASS: beamer
+#+LATEX_listingsCLASS_OPTIONS: [presentation]
+#+BEAMER_THEME: Madrid
+#+EPRESENT_FRAME_LEVEL: 1
+* Overview
+- A Lisp
+- Pattern matching
+- Optional Types
+- Built in YACC
+* Lenses
+- Feature the YACC parser
+- Functional updates of a JSON structure
+- Yak shave some lenses
+* Lenses
+- Getting
+  #+BEGIN_EXAMPLE
+   (from-json [get a-key 0] "{ \"a-key\" : [1,2,3,4] }")
+              ^^^^^^^^^^^^^
+     => 1
+  #+END_EXAMPLE
+- Setting
+  #+BEGIN_EXAMPLE
+    ((from-json [set a-key 0] "{ \"a-key\" : [1,2,3,4] }")
+                ^^^^^^^^^^^^^
+                (+ 1))
+       => [json.object [(@p a-key [2 2 3 4])]]
+  #+END_EXAMPLE
+* Lenses
+- Tokenized by Shen's own reader!
+  #+BEGIN_EXAMPLE
+    (read-from-string "{ \"a-key\" : [1,2,3,4] }")
+    => [{ "a-key" : [cons 1 [cons , [cons 2
+                      [cons , [cons 3 [cons ,
+                         [cons 4 []]]]]]]] }]
+  #+END_EXAMPLE
+- Then built-in parser takes over
+  #+BEGIN_EXAMPLE
+    (compile <object>
+      (compile <uncons>
+        (...)))
+     => [object (@p a-key [1 2 3 4])]
+  #+END_EXAMPLE
+* Lenses
+ #+BEGIN_EXAMPLE
+   (defcc <uncons>
+     [cons X Xs] <uncons> := [(eval [cons X Xs]) | <uncons> ] ;
+     X <uncons> := [X | <uncons> ];
+     X := [X])
+ #+END_EXAMPLE
+* Lenses
+- Notice how much this ...
+  #+BEGIN_EXAMPLE
+    (defcc <object>
+      { <members> } := [object | <members> ];
+      {}            := [object];
+      { }           := [object];)
+
+    (defcc <members>
+      <pair> , <members> := [<pair> | <members>];
+      <pair>             := [<pair>];)
+
+    (defcc <pair>
+      String : <value> := (@p (intern String) <value>);)
+
+    (defcc <array>
+      [ <elements> ] := <elements>;
+      ...
+  #+END_EXAMPLE
+* Lenses
+- Looks like ...
+
+  #+ATTR_LATEX: :width 0.6\linewidth
+  [[file:json-notation.png]]
+
+* Lenses
+- A lens for objects
+  #+BEGIN_EXAMPLE
+  (define object-lens
+    Key [object | KVs] ->
+      (@p (get-key Key KVs)
+          (set-key Key KVs)))
+  #+END_EXAMPLE
+- ~(set-key ...)~ is curried!
+  #+BEGIN_EXAMPLE
+  (set-key Key KVs)
+    == (/. Object V (set-key Key KVs Object V))
+  #+END_EXAMPLE
+- A lens to the 'a-key' key
+  #+BEGIN_EXAMPLE
+  (object-lens a-key)
+  #+END_EXAMPLE
+* Lenses
+- A lens for arrays
+  #+BEGIN_EXAMPLE
+  (define array-lens
+    Index Array ->
+      (@p (get-index Index Array)
+          (set-index Index Array)))
+  #+END_EXAMPLE
+- A lens to the 3rd element
+  #+BEGIN_EXAMPLE
+  (array-lens 2)
+  #+END_EXAMPLE
+* Lenses
+- Combine two lenses
+  #+BEGIN_EXAMPLE
+  (define compose
+     Lens1F Lens2F Json ->
+       (let Lens1 (Lens1F Json)
+            Lens2 (Lens2F (fst Lens1))
+            (@p (fst Lens2)
+                (/. V ((snd Lens1) ((snd Lens2) V))))))
+
+  #+END_EXAMPLE
+* Lenses
+- Combine many lenses
+  #+BEGIN_EXAMPLE
+  (define starter-lens
+    X -> (@p X (/. V V)))
+
+  (define fold-lenses
+     [] -> starter-lens
+     [Lens | Lenses] ->
+        (fold-lenses-helper
+           (compose starter-lens Lens)
+           Lenses))
+  #+END_EXAMPLE
+
+* Lenses
+- Run a lens
+ #+BEGIN_EXAMPLE
+ (define modify
+    LensF Json G ->
+    (let Lens (LensF Json)
+         ((snd Lens) (G (fst Lens)))))
+
+ (define access
+    LensF Json -> (fst (LensF Json)))
+ #+END_EXAMPLE
+
+* Lenses
+- Adding 1 to the first element
+  #+BEGIN_EXAMPLE
+  { "a-key" : [  1  ,2,3,4]}
+               ^^^^^
+  (modify (fold-lenses [(object-lens a-key)
+                        (array-lens  0    )])
+                       (+ 1))
+  #+END_EXAMPLE
+* Lenses
+- Add 1 to a deeply-nested element
+  #+BEGIN_EXAMPLE
+    { "a-key" : [1,2, { "another-key" : [3,  4  ,5,6]},7]}
+                                           ^^^^^
+    (modify (fold-lenses [(object-lens a-key      )
+                          (array-lens  2          )
+                          (object-lens another-key)
+                          (array-lens  1          )])
+                         (+ 1))
+  #+END_EXAMPLE
+* Lenses
+- The UI is messy, what I want is:
+  #+BEGIN_EXAMPLE
+     [set a-key 2 another-key 1]
+     => (modify (fold-lenses [(object-lens a-key      )
+                              (array-lens  2          )
+                              (object-lens another-key)
+                              (array-lens  1          )])
+                             ...)
+  #+END_EXAMPLE
+* Lenses
+- Describe the composition as a grammar!
+  #+BEGIN_EXAMPLE
+  (defcc <action>
+    set <chain-lenses> :=
+        ((function modify) (fold-lenses <chain-lenses>));
+    get <chain-lenses> :=
+        ((function access) (fold-lenses <chain-lenses>));)
+
+  (defcc <chain-lenses>
+     <lens> <chain-lenses> := [<lens> | <chain-lenses>];
+     <lens>                := [<lens>];)
+
+  (defcc <lens>
+     X := (array-lens X) where (number? X);
+     X := (object-lens X) where (symbol? X);)
+  #+END_EXAMPLE
+
+* Lenses
+- Putting it all together:
+  #+BEGIN_EXAMPLE
+    (define from-json
+      Path JsonString ->
+        ((compile <action> Path)
+         (compile <object>
+         (compile <uncons> (read-from-string JsonString)))))
+
+  #+END_EXAMPLE
+
+* Lenses
+- Given the JSON
+ #+BEGIN_EXAMPLE
+   { "a-key" : [1,2,{ "another-key" : [3,4,  5  ,6] },7]}
+                                           ^^^^^
+ #+END_EXAMPLE
+- Add 1 to 5
+ #+BEGIN_EXAMPLE
+   ((from-json
+       [set a-key 2 another-key 2]
+       "{\"a-key\":[1,2,{\"another-key\":[3,4,5,6]},7]}")
+       (+ 1))
+ #+END_EXAMPLE
+- Results in ...
+ #+BEGIN_EXAMPLE
+   [object [
+      (@p a-key [1 2 [object [
+                       (@p another-key [3 4  6  6])]
+                                           ^^^^^
+                     ] 7])]]
+ #+END_EXAMPLE
+* Coins - Typed
+- Initial glance at the type system
+- Debugging at the type level
+- Inserting coins into a coin store
+* Coins - Typed
+- Typed coin store example
+  #+BEGIN_EXAMPLE
+    (insert-coin penny)
+    => [penny] : (list coin)
+
+    (insert-coin dime)
+    => [penny dime] : (list coin)
+  #+END_EXAMPLE
+
+* Coins - Typed
+  - Structure of a Shen datatype
+    #+BEGIN_EXAMPLE
+      (datatype ....
+         things-that-need-to-be-true;
+         ____________________________
+         want-to-prove;
+
+         things-that-need-to-be-true;
+         ____________________________
+         want-to-prove;
+         ...
+      )
+    #+END_EXAMPLE
+* Coins - Typed
+- Coin type
+  #+BEGIN_EXAMPLE
+    (datatype coin
+      ___________
+      penny : coin;
+      ___________
+      nickel: coin;
+      ___________
+      dime : coin;
+      ___________
+      quarter: coin;
+      ... )
+  #+END_EXAMPLE
+- Roughly the same as
+  #+BEGIN_EXAMPLE
+  data Coin = Penny | Nickel | Dime | Quarter
+  #+END_EXAMPLE
+* Coins - Typed
+- Types for storing
+  #+BEGIN_EXAMPLE
+    ____________________
+    *store*: (list coin);
+
+    X : A;
+    ______________
+    (value X): A;
+
+    Y : A;
+    _____________
+    (set X Y) : A;)
+  #+END_EXAMPLE
+* Coins - Typed
+- Inserting into global store
+ #+BEGIN_EXAMPLE
+   (define insert-coin
+     { coin --> (list coin) }
+     Coin -> (set *store* (append (value *store*) Coin)))
+ #+END_EXAMPLE
+* Coins - Typed
+- Running
+  #+BEGIN_EXAMPLE
+  (set *store* [])
+  => []
+  (insert-coin penny)
+  => type error
+  #+END_EXAMPLE
+* Coins - Typed
+- Step through the typechecker
+ #+BEGIN_EXAMPLE
+   (spy +)
+ #+END_EXAMPLE
+- Stepping session
+ #+BEGIN_EXAMPLE
+    ______________________________________ 3 inferences
+   ?- (define insert-coin ... ) : Var2
+   >
+   _______________________________________ 23 inferences
+   ?- &&Coin : coin
+
+   1. &&Coin : Var10
+   2. insert-coin : (coin --> (list coin))
+
+ ...
+ #+END_EXAMPLE
+* Coins - Typed
+- Current expression
+ #+BEGIN_EXAMPLE
+   (set *store* (append (value *store*) Coin))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ #+END_EXAMPLE
+
+- Step session
+ #+BEGIN_EXAMPLE
+   __________________________________________ 90 inferences
+   ?- ((append ...) &&Coin) : (list coin)
+
+   1. &&Coin : coin
+   2. insert-coin : (coin --> (list coin))
+   ...
+ #+END_EXAMPLE
+* Coins - Typed
+- Current expression
+ #+BEGIN_EXAMPLE
+   (set *store* (append (value *store*) Coin))
+                                        ^^^^
+ #+END_EXAMPLE
+
+- Step session - contradiction! ~(list coin) !== coin~
+ #+BEGIN_EXAMPLE
+   _________________________________________ 156 inferences
+   ?- &&Coin : (list coin)
+
+   1. &&Coin : coin
+   2. insert-coin : (coin --> (list coin))
+
+   >
+   type error in rule 1 of insert-coin
+ #+END_EXAMPLE
+
+* Coins - Typed
+ #+BEGIN_EXAMPLE
+   (define insert-coin
+     { coin --> (list coin) }
+     Coin -> (set *store* (append (value *store*) [Coin])))
+                                                  ^^^^^^
+ #+END_EXAMPLE
+* Coins - Typed
+- Datatypes also take side-conditions
+  #+BEGIN_EXAMPLE
+    (datatype coins
+      if (= 1 1)
+      ___________
+      penny : coin;
+      ...)
+  #+END_EXAMPLE
+* Coins - Typed
+- Which run arbitrary code!
+  #+BEGIN_EXAMPLE
+    (datatype coins
+      if (do (output "Hurr-durr, I'm a penny!~%") true)
+      ___________
+      penny : coin;
+      ...)
+  #+END_EXAMPLE
+- Type level println!
+  #+BEGIN_EXAMPLE
+  (insert-coin penny)
+   => "Hurr-durr, I'm a penny!"
+      [penny] : (list coin)
+  #+END_EXAMPLE
+* Coins - Typed
+- Ad hoc hole driven development!
+  #+BEGIN_EXAMPLE
+    (datatype <<HOLE>>
+
+     if (do (output (make-string "<<HOLE>> : ~A~%" X)) true)
+     ______________
+     <<HOLE>> : X;)
+  #+END_EXAMPLE
+* Coins - Typed
+
+- Load with typechecking
+  #+BEGIN_EXAMPLE
+    (define insert-coin
+      { coin --> (list coin) }
+      Coin -> (set *store* <<HOLE>>))
+    => <<HOLE>> : [list coin]
+       insert-coin : (coin --> (list coin))
+  #+END_EXAMPLE
+- Don't run this or you'll get:
+  #+BEGIN_EXAMPLE
+  (insert-coin penny)
+  => [<<HOLE>>]
+  #+END_EXAMPLE
+* Coins - Untyped
+- Use the typechecker for runtime reflection
+- Grow a datatype at runtime!
+* Coins - Untyped
+- Add and make coins.
+  #+BEGIN_EXAMPLE
+    (with-store penny)
+    => "penny is not a coin."
+    (with-store [make penny])
+    => type#coin
+    (with-store penny)
+    => [penny]
+    (with-store [remove penny])
+    => type#coin
+    (with-store penny)
+    => "penny is not a coin"
+  #+END_EXAMPLE
+* Coins - Untyped
+- Use the typechecker for runtime reflection!
+ #+BEGIN_EXAMPLE
+   (define with-store
+     ...
+     Coin ->
+       (if (= (shen.typecheck Coin coin) coin)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+          ( ... )
+        (make-string "~A is not a coin." Coin)))
+ #+END_EXAMPLE
+- A simple example
+  #+BEGIN_EXAMPLE
+    (shen.typecheck "hello world" string)
+    => string
+    (shen.typecheck "hello world" number)
+    => false
+  #+END_EXAMPLE
+* Coins - Untyped
+- Add or remove from the global list of coin types
+  #+BEGIN_EXAMPLE
+    (define to-coin
+      make Coin    -> (append (value *coins*) [Coin])
+      remove Coin  -> (remove Coin (value *coins*)))
+  #+END_EXAMPLE
+- Eval a fresh datatype with only those types!
+  #+BEGIN_EXAMPLE
+    (define with-store
+      [Action Coin] ->
+       ...
+        (do
+          ...
+          (set *current-datatype* (create-datatype NewCoins))
+          (eval (value *current-datatype*)))))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      Coin -> ...)
+  #+END_EXAMPLE
+* Coins - Untyped
+- Creating the datatype
+  #+BEGIN_EXAMPLE
+    (define create-datatype
+      Coins ->
+        (append
+          [datatype coin]
+          (mapcan (/. Coin [
+                          ___________
+                          Coin : coin;
+                        ])
+               Coins)))
+  #+END_EXAMPLE
+* Coins - Untyped
+- Example Run
+  #+BEGIN_EXAMPLE
+    (create-datatype [penny dime])
+    => [datatype coin
+          __________
+          penny : coin;
+          __________
+          dime : coin;]
+  #+END_EXAMPLE
+* Coins - Untyped
+- Examine datatype at runtime!
+  #+BEGIN_EXAMPLE
+    (value *current-datatype*)
+      => [datatype coin
+          __________
+          penny : coin;
+          __________
+          dime : coin;]
+  #+END_EXAMPLE
+* API - Dump
+- Use built-in functions to inspect source code.
+- DIY Hoogle.
+* API - Dump
+- Don't need to give typecheck a concrete type!
+  #+BEGIN_EXAMPLE
+    (shen.typecheck 1 A)
+    => number
+  #+END_EXAMPLE
+- ~A~ is unified with the type
+* API - Dump
+- An 'undefined' type
+  #+BEGIN_EXAMPLE
+    (datatype undefined
+       ______________
+       ??? : X;
+    )
+  #+END_EXAMPLE
+* API - Dump
+- Some sample functions with fake datatypes
+  #+BEGIN_EXAMPLE
+    (define a-b-c
+      { a --> b --> c }
+      _ _ -> ??? )
+
+    (define b-c-d
+      { b --> c --> d }
+      _ _ -> ??? )
+
+    (define c-d
+      { c --> d }
+      _ -> ??? )
+
+    (define a-e
+      { a --> e }
+      _ -> ??? )
+  #+END_EXAMPLE
+
+* API - Dump
+- Extract the type signatures!
+  #+BEGIN_EXAMPLE
+    (dump "test.shen")
+    => [[a-b-c [a --> [b --> c]]]
+        [b-c-d [b --> [c --> d]]]
+        [c-d   [c --> d]]
+        [a-e   [a --> e]]
+        [b-f   [b --> f]]]
+  #+END_EXAMPLE
+- Roll you own semver!
+* API - Dump
+- Extraction code - by Shen's author, adapted from mailing list post.
+  #+BEGIN_EXAMPLE
+    (define dump
+      Shen ->
+        (let Defs (mapcan (function def) (read-file Shen))
+             Types (map get-sig Defs)
+          Types))
+
+    (define def
+      [define F | _] -> [F]
+      _ -> [])
+
+    (define get-sig
+      Def -> [Def (shen.typecheck Def (protect A))])
+  #+END_EXAMPLE
+
+* API - Dump
+ - Hoogle style search!
+   #+BEGIN_EXAMPLE
+     (find-signature [a --> b --> X]
+                     (dump "Type-Tetris-Test.shen"))
+     => [[a-b-c [a --> b --> c]]]
+   #+END_EXAMPLE
+* API - Dump
+- Generate a grammar at runtime.
+   #+BEGIN_EXAMPLE
+     (define find-signature
+       Signature ... ->
+          (let ...
+               SigParserAST (append
+                               [defcc SigParserName]
+                                 Signature [:= true;]
+                                 [_ := false;])
+               _ (eval SigParserAST)
+             (...)))
+   #+END_EXAMPLE
+- Generated grammar
+   #+BEGIN_EXAMPLE
+     (defcc Parser12345
+       a --> b --> X := true;
+       _ := false;)
+   #+END_EXAMPLE
+* Rank N Types
+- Emulate Rank N Types in Shen!
+- This fails to typecheck
+  #+BEGIN_EXAMPLE
+  (define foo
+     { (A --> A) --> (number * symbol) }
+     F -> (@p (F 1) (F a)))
+  #+END_EXAMPLE
+- The type variable ~A~ needs to be determined by application.
+
+* Rank N Types
+- Neat hack by Shen author, Mark Tarver.
+- This works!
+  #+BEGIN_EXAMPLE
+    (define rank-n-stein
+      {(forall A (A --> A)) --> (number * symbol)}
+      F -> (@p (F 1) (F a)))
+  #+END_EXAMPLE
+* Rank N Types
+ - Substitute out free variable in forall
+  #+BEGIN_EXAMPLE
+    let C (subst (gensym &&) A B)
+    X : C;
+    ____________________________
+    X : (mode (forall A B) -);
+  #+END_EXAMPLE
+ - Mode declaration disallows two way binding (unification)
+  #+BEGIN_EXAMPLE
+    C => (&&12345 --> &&12345)
+  #+END_EXAMPLE
+* Rank N Types
+ + Typechecking ~(F 1)~
+ + ~(forall A (A --> A))~ -> ~(free-var --> free-var)~
+ + Type system can now unify ~free-var~ with ~number~
+ + ~(forall A (A --> B))~ -> ~(free-var --> B)~
+* Rank N Types
+- When ~forall ...~ is in the environment ...
+- Replace with ~S~.
+  #+BEGIN_EXAMPLE
+    (scheme A B S V);
+    X : S >> P;
+    _______________________________
+    X : (mode (forall A B) -) >> P;
+  #+END_EXAMPLE
+* Rank N Types
+- Recurse over ~(A --> A)~
+- Build up ~(D | E)~.
+ #+BEGIN_EXAMPLE
+   !;
+   (scheme A B D F);
+   (scheme A C E F);
+   _____________________________
+   (scheme A (B | C) (D | E) F);
+ #+END_EXAMPLE
+* Rank N Types
+- If ~A~ is found substitute with ~V~
+  #+BEGIN_EXAMPLE
+    !;
+    _________________
+    (scheme A A V V);
+  #+END_EXAMPLE
+- The ! is a cut. No backtracking.
+- In the end, just return:
+  #+BEGIN_EXAMPLE
+    _________________
+    (scheme A B B _);
+  #+END_EXAMPLE
+* Rank N Types
+- (Very) roughly like:
+  #+BEGIN_EXAMPLE
+    scheme(A [B | C] [D | E] F) :-
+       scheme(A B D F);
+       scheme(A C E F).
+    scheme (A B B _).
+    scheme (A A V V).
+  #+END_EXAMPLE
+* Rank N Types
+- The Book Of Shen (1st & 2nd edition)
+- The Shen mailing list
+- Questions?
